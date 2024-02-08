@@ -1,0 +1,123 @@
+WITH buys AS (
+    SELECT * FROM dex.trades WHERE token_bought_address = 0x9E9FbDE7C7a83c43913BddC8779158F1368F0413
+),
+sells AS (
+    SELECT * FROM dex.trades WHERE token_sold_address = 0x9E9FbDE7C7a83c43913BddC8779158F1368F0413
+),
+all AS (
+    SELECT tx_hash, 'BUY' AS side, tx_from, amount_usd, token_bought_amount_raw/1e18 AS token_amount FROM buys
+    UNION ALL
+    SELECT tx_hash, 'SELL' AS side, tx_from, -1*amount_usd, token_sold_amount_raw/1e18 AS token_amount FROM sells
+),
+/*
+wallet_data AS (
+    SELECT 
+        side,
+        tx_from,
+        COUNT(*) AS num_tx,
+        SUM(amount_usd) AS total_USD
+    FROM all
+    GROUP BY 1,2
+),
+aggregate_data_buys AS (
+    SELECT 
+        SUM(num_tx) AS cum_tx_usd_buy,
+        SUM(total_USD) AS cum_volume_usd_buy,
+        AVG(total_USD) AS average_tx_value_buy,
+        AVG(num_tx) AS average_user_tx_num_buy
+    FROM wallet_data
+    WHERE side = 'BUY'
+),
+aggregate_data_sells AS (
+    SELECT 
+        SUM(num_tx) AS cum_tx_usd_sell,
+        SUM(total_USD) AS cum_volume_usd_sell,
+        AVG(total_USD) AS average_tx_value_sell,
+        AVG(num_tx) AS average_user_tx_num_sell
+    FROM wallet_data
+    WHERE side = 'SELL'
+),
+final_aggregate AS (
+    SELECT 
+        *, 
+        CASE
+            WHEN side = 'BUY' THEN
+                (total_USD/cum_volume_usd_buy)*100
+            ELSE
+                (total_USD/cum_volume_usd_sell)*100
+        END AS percent_of_volume
+    FROM wallet_data
+    LEFT JOIN aggregate_data_buys ON 1=1
+    LEFT JOIN aggregate_data_sells ON 1=1
+    ORDER BY 13 DESC
+),
+whale_list AS (
+    SELECT DISTINCT side, tx_from AS whale_wallet, percent_of_volume
+    FROM final_aggregate 
+    WHERE ABS(total_usd) > {{whale_threshold
+    ORDER BY 3 DESC
+    LIMIT 100
+),
+*/
+gas_all_aggregate AS (
+    SELECT 
+        tx_from AS wallet, 
+        SUM(gas_used) AS gas_used, 
+        SUM(amount_usd) AS net_volume_usd,
+        SUM(ABS(amount_usd)) AS total_volume_usd, 
+        SUM(token_amount) AS net_volume,
+        SUM(ABS(token_amount)) AS total_volume
+    FROM all a
+    INNER JOIN ethereum.transactions t ON a.tx_hash = t.hash
+    WHERE abs(amount_usd) > 10
+    GROUP BY 1
+),
+median_gas_price AS (
+    SELECT
+        date_trunc('hour',block_time) AS block_time,
+        (APPROX_PERCENTILE(gas_price, 0.5)) / 1e9 AS median_gas_price_gwei,
+        (APPROX_PERCENTILE(gas_limit, 0.5)) / 1e9 AS median_gas_limit_gwei
+    FROM
+        ethereum.transactions
+    WHERE
+        block_time >= (SELECT MIN(block_time) FROM buys)
+        GROUP BY 1
+),
+gas_granular AS (
+    SELECT
+        t.block_time,
+        tx_from AS wallet,
+        (gas_used/abs(token_amount)) AS gas_per_usd
+    FROM all a
+    INNER JOIN ethereum.transactions t ON a.tx_hash = t.hash
+    ORDER BY 3 DESC
+),
+gas_hourly AS (
+    SELECT
+        date_trunc('hour',t.block_time) AS block_time,
+        g.median_gas_price_gwei,
+        APPROX_PERCENTILE(
+            CASE 
+                WHEN token_amount >= 1 THEN
+                    (gas_used/abs(token_amount))
+                ELSE
+                    (gas_used*abs(token_amount))
+            END
+        , 0.5) AS gas_per_token,
+        APPROX_PERCENTILE(
+            gas_limit
+        , 0.5) AS median_gas_limit,
+        APPROX_PERCENTILE(
+            gas_used
+        , 0.5) AS median_gas,
+        SUM(token_amount) AS hourly_volume,
+        SUM(gas_used) AS hourly_gas
+    FROM all a
+    INNER JOIN ethereum.transactions t ON a.tx_hash = t.hash
+    INNER JOIN median_gas_price g ON date_trunc('hour',t.block_time) = g.block_time
+    GROUP BY 1,2
+    ORDER BY 2 DESC
+)
+
+SELECT block_time, median_gas_price_gwei, hourly_volume, hourly_gas, CASE WHEN hourly_volume >= 1 THEN hourly_gas/hourly_volume ELSE hourly_gas*hourly_volume END AS gas_per_token FROM gas_hourly ORDER BY 1 DESC
+--WHERE median_gas_per_usd < 100000
